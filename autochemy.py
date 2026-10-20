@@ -558,7 +558,14 @@ class ORCASoftwareSuite:
             skipped_modules.append(msg)
             module_classes.append((PeriodicPlaceholderModule, "Periodic"))
 
-        module_classes.append((JobManagerPlaceholderModule, "Job Manager"))
+        try:
+            from modules.job_manager import JobManagerModule
+            module_classes.append((JobManagerModule, "Job Manager"))
+        except Exception as exc:
+            msg = f"Skipping module Job Manager: {exc}"
+            print(msg)
+            skipped_modules.append(msg)
+            module_classes.append((JobManagerPlaceholderModule, "Job Manager"))
 
         for module_class, module_name in module_classes:
             try:
@@ -700,6 +707,13 @@ class ORCASoftwareSuite:
                 pass
             self._session_autosave_job = None
         self._save_session_file()
+        job_manager = self.modules.get("Job Manager") if hasattr(self, "modules") else None
+        pool = getattr(job_manager, "pool", None)
+        if pool is not None:
+            try:
+                pool.close_all()
+            except Exception:
+                pass
         self.root.destroy()
 
     def _forget_last_session(self):

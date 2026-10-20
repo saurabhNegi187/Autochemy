@@ -1891,6 +1891,124 @@ class InputCreatorModule5:
             self._update_saved_machine_list()
             self.saved_machine_var.set("None")
 
+    # ---------------- HPC Job Manager hand-off ----------------
+
+    def _job_manager_and_app(self):
+        top = self.parent.winfo_toplevel()
+        app = getattr(top, "_orca_app", None)
+        modules = getattr(app, "modules", {}) if app else {}
+        jm = modules.get("Job Manager")
+        if jm is None or not hasattr(jm, "open_submit_dialog"):
+            messagebox.showerror(
+                "Job Manager",
+                "The Job Manager module is not available.\n"
+                "Install paramiko (python -m pip install paramiko) and restart AutoChemy.",
+                parent=self.parent,
+            )
+            return None, None
+        return jm, app
+
+    def _open_hpc_job_manager(self):
+        jm, app = self._job_manager_and_app()
+        if jm is not None:
+            app._show_job_manager_sidebar()
+
+    def _hpc_ssh_prefill(self):
+        """Host/user/key typed in the SSH terminal box, to pre-fill a new cluster."""
+        try:
+            port = int((self.ssh_port.get() or "22").strip() or "22")
+        except ValueError:
+            port = 22
+        qsys = (self.hpc_queue_system.get() or "").upper()
+        sched = "PBS" if "PBS" in qsys else "SLURM"
+        return {
+            "host": (self.ssh_host.get() or "").strip(),
+            "username": (self.ssh_user.get() or "").strip(),
+            "port": port,
+            "key_path": (self.ssh_key.get() or "").strip(),
+            "scheduler": sched,
+        }
+
+    def _submit_to_hpc_job_manager(self):
+        """Stage the generated input + batch script and open the submit dialog."""
+        from modules import hpc_backend
+
+        if self.exec_mode.get() != "HPC":
+            if not messagebox.askyesno(
+                "Submit to HPC",
+                "Execution mode is not set to HPC, so the script may not be a cluster batch script.\n\n"
+                "Continue anyway?",
+                parent=self.parent,
+            ):
+                return
+        jm, app = self._job_manager_and_app()
+        if jm is None:
+            return
+        try:
+            self.generate()
+        except Exception as exc:
+            messagebox.showerror("Submit to HPC", f"Could not generate the input:\n{exc}", parent=self.parent)
+            return
+
+        name = hpc_backend.safe_name(self.filename.get(), "orca_job")
+        inp_text = self.txt_inp.get("1.0", tk.END).strip()
+        sh_text = self.txt_sh.get("1.0", tk.END).strip()
+        if not inp_text:
+            messagebox.showwarning("Submit to HPC", "The input is empty - generate it first.", parent=self.parent)
+            return
+        if not sh_text:
+            messagebox.showwarning(
+                "Submit to HPC",
+                "There is no batch script. Choose HPC mode and a queue system (or a saved machine) "
+                "so a script is generated.",
+                parent=self.parent,
+            )
+            return
+
+        ext = ".inp"
+        if self.task.get() == "Custom":
+            job_data = getattr(self, "custom_jobs", {}).get(self.subtask.get(), {})
+            if job_data.get("gaussian_format", False):
+                ext = ".gjf"
+        contents = {
+            f"{name}{ext}": (inp_text + "\n").encode("utf-8"),
+            f"{name}.sh": (sh_text + "\n").encode("utf-8"),
+        }
+
+        extra = []
+        if "xtb" not in self.task.get().lower():
+            for attr in ("moinp_file", "qro_file", "hess_file"):
+                var = getattr(self, attr, None)
+                path = (var.get().strip() if var is not None else "")
+                if path and os.path.isfile(path):
+                    extra.append(path)
+
+        if self.task.get() == "Transition State (TS)" and self.subtask.get() == "NEB-TS":
+            prod_disk = (self.neb_product_path.get() or "").strip()
+            inline = (getattr(self, "_neb_product_coords_text", "") or "").strip()
+            if prod_disk and os.path.isfile(prod_disk):
+                with open(prod_disk, "rb") as fh:
+                    contents["neb_product.xyz"] = fh.read()
+            elif inline:
+                rows = _normalize_to_xyz_rows(inline)
+                if rows:
+                    lines = [f"{len(rows)}", "NEB product (AutoChemy)"] + [f"{s} {x} {y} {z}" for s, x, y, z in rows]
+                    contents["neb_product.xyz"] = ("\n".join(lines) + "\n").encode("utf-8")
+            else:
+                messagebox.showwarning("Submit to HPC",
+                                       "NEB-TS needs a product structure; neb_product.xyz was not added.",
+                                       parent=self.parent)
+
+        try:
+            files = hpc_backend.stage_files(name, contents, extra)
+        except OSError as exc:
+            messagebox.showerror("Submit to HPC", f"Could not prepare the files:\n{exc}", parent=self.parent)
+            return
+
+        app._show_job_manager_sidebar()
+        jm.open_submit_dialog(files=files, script=f"{name}.sh", job_name=name,
+                              ssh_prefill=self._hpc_ssh_prefill())
+
     def _set_hpc_ssh_visible(self, visible):
         frame = getattr(self, "hpc_ssh_frame", None)
         if frame is None:
@@ -3706,6 +3824,18 @@ class InputCreatorModule5:
         ttk.Button(ssh_btn, text="Paste", command=self._paste_hpc_ssh).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(ssh_btn, text="Clear", command=self._clear_hpc_ssh).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Label(ssh_btn, textvariable=self.ssh_status, font=("Segoe UI", 9, "italic")).pack(side=tk.LEFT, padx=(12, 0))
+
+        hpc_submit_row = ttk.Frame(self.hpc_ssh_frame)
+        hpc_submit_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 6))
+        ttk.Button(hpc_submit_row, text="🚀 Submit to HPC",
+                   command=self._submit_to_hpc_job_manager).pack(side=tk.LEFT)
+        ttk.Button(hpc_submit_row, text="📋 Job Manager",
+                   command=self._open_hpc_job_manager).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(
+            hpc_submit_row,
+            text="Uploads the generated input + script, submits it and tracks the job.",
+            font=("Segoe UI", 8, "italic"),
+        ).pack(side=tk.LEFT, padx=(10, 0))
 
         self.hpc_terminal = EmbeddedTerminal(
             self.hpc_ssh_frame,

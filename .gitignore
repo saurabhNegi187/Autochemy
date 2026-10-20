@@ -40,3 +40,7 @@ AutoChemy_User_Data/saved_machines.json
 AutoChemy_User_Data/pes_plot_projects.json
 AutoChemy_User_Data/pes_plot_defaults.json
 .aider*
+AutoChemy_User_Data/hpc_profiles.json
+AutoChemy_User_Data/hpc_job_history.json
+AutoChemy_User_Data/hpc_known_hosts
+AutoChemy_User_Data/hpc_staging/
